@@ -3440,7 +3440,8 @@ class Scheduler(ServerNode):
                 self.total_occupancy -= duration
                 ws.occupancy -= duration
             self.check_idle_saturated(ws)
-            self.release_resources(ts, ws)
+            if not ts.actor:
+                self.release_resources(ts, ws)
             if send_worker_msg:
                 self.worker_send(w, send_worker_msg)
 
@@ -3813,6 +3814,7 @@ class Scheduler(ServerNode):
             if ts.actor:
                 for ws in ts.who_has:
                     ws.actors.discard(ts)
+                    self.release_resources(ts, ws)
                 if ts.who_wants:
                     ts.exception_blame = ts
                     ts.exception = "Worker holding Actor was lost"

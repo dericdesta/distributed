@@ -1191,6 +1191,9 @@ class Worker(ServerNode):
             for key in list(keys):
                 self.log.append((key, "delete"))
                 if key in self.task_state:
+                    if key in self.actors and key in self.resource_restrictions:
+                        for resource, quantity in self.resource_restrictions[key].items():
+                            self.available_resources[resource] += quantity
                     self.release_key(key)
 
                 if key in self.dep_state:
@@ -1547,7 +1550,7 @@ class Worker(ServerNode):
                 assert key not in self.ready
 
             out = None
-            if key in self.resource_restrictions:
+            if key in self.resource_restrictions and key not in self.actors:
                 for resource, quantity in self.resource_restrictions[key].items():
                     self.available_resources[resource] += quantity
 

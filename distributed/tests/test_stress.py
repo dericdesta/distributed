@@ -14,7 +14,7 @@ from toolz import concat, sliding_window
 from distributed import Client, wait, Nanny
 from distributed.config import config
 from distributed.metrics import time
-from distributed.utils import All
+from distributed.utils import All, ignoring
 from distributed.utils_test import (
     gen_cluster,
     cluster,
@@ -108,11 +108,8 @@ def test_stress_creation_and_deletion(c, s):
     def create_and_destroy_worker(delay):
         start = time()
         while time() < start + 5:
-            n = Nanny(s.address, nthreads=2, loop=s.loop)
-            n.start(0)
-
+            n = yield Nanny(s.address, nthreads=2, loop=s.loop)
             yield gen.sleep(delay)
-
             yield n.close()
             print("Killed nanny")
 
@@ -129,7 +126,7 @@ def test_stress_scatter_death(c, s, *workers):
     s.allowed_failures = 1000
     np = pytest.importorskip("numpy")
     L = yield c.scatter([np.random.random(10000) for i in range(len(workers))])
-    yield c._replicate(L, n=2)
+    yield c.replicate(L, n=2)
 
     adds = [
         delayed(slowadd, pure=True)(
@@ -169,27 +166,10 @@ def test_stress_scatter_death(c, s, *workers):
         yield w.close()
         alive.remove(w)
 
-    try:
-        yield gen.with_timeout(timedelta(seconds=25), c._gather(futures))
-    except gen.TimeoutError:
-        ws = {w.address: w for w in workers if w.status != "closed"}
-        print(s.processing)
-        print(ws)
-        print(futures)
-        try:
-            worker = [w for w in ws.values() if w.waiting_for_data][0]
-        except Exception:
-            pass
-        if config.get("log-on-err"):
-            import pdb
+    with ignoring(CancelledError):
+        yield c.gather(futures)
 
-            pdb.set_trace()
-        else:
-            raise
-    except CancelledError:
-        pass
-    finally:
-        futures = None
+    futures = None
 
 
 def vsum(*args):

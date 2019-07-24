@@ -24,7 +24,8 @@ from distributed.metrics import time
 from distributed.protocol.pickle import dumps
 from distributed.worker import dumps_function, dumps_task
 from distributed.utils import tmpfile
-from distributed.utils_test import (
+from distributed.utils_test import (  # noqa: F401
+    cleanup,
     inc,
     dec,
     gen_cluster,
@@ -109,7 +110,7 @@ def test_decide_worker_with_many_independent_leaves(c, s, a, b):
 @gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 3)
 def test_decide_worker_with_restrictions(client, s, a, b, c):
     x = client.submit(inc, 1, workers=[a.address, b.address])
-    yield wait(x)
+    yield x
     assert x.key in a.data or x.key in b.data
 
 
@@ -256,7 +257,6 @@ def test_add_worker(s, a, b):
     w = Worker(s.address, nthreads=3)
     w.data["x-5"] = 6
     w.data["y"] = 1
-    yield w
 
     dsk = {("x-%d" % i): (inc, i) for i in range(10)}
     s.update_graph(
@@ -265,11 +265,8 @@ def test_add_worker(s, a, b):
         client="client",
         dependencies={k: set() for k in dsk},
     )
-
-    s.add_worker(
-        address=w.address, keys=list(w.data), nthreads=w.nthreads, services=s.services
-    )
-
+    s.validate_state()
+    yield w
     s.validate_state()
 
     assert w.ip in s.host_info
@@ -624,14 +621,6 @@ def test_update_graph_culls(s, a, b):
     assert "z" not in s.dependencies
 
 
-@gen_cluster(nthreads=[])
-def test_add_worker_is_idempotent(s):
-    s.add_worker(address=alice, nthreads=1, resolve_address=False)
-    nthreads = dict(s.nthreads)
-    s.add_worker(address=alice, resolve_address=False)
-    assert s.nthreads == s.nthreads
-
-
 def test_io_loop(loop):
     s = Scheduler(loop=loop, validate=True)
     assert s.io_loop is loop
@@ -665,7 +654,7 @@ def test_scatter_no_workers(c, s):
     assert time() < start + 1.5
 
     w = Worker(s.address, nthreads=3)
-    yield [c.scatter(data={"y": 2}, timeout=5), w._start()]
+    yield [c.scatter(data={"y": 2}, timeout=5), w]
 
     assert w.data["y"] == 2
     yield w.close()
@@ -959,7 +948,7 @@ def test_worker_breaks_and_returns(c, s, a):
 
     yield wait(future)
 
-    a.batched_stream.comm.close()
+    yield a.batched_stream.comm.close()
 
     yield gen.sleep(0.1)
     start = time()
@@ -1085,6 +1074,7 @@ def test_close_nanny(c, s, a, b):
         yield gen.sleep(0.1)
         assert time() < start + 5
 
+    assert not a.is_alive()
     assert a.pid is None
 
     for i in range(10):
@@ -1148,11 +1138,13 @@ def test_scheduler_file():
 
 @pytest.mark.xfail(reason="")
 @gen_cluster(client=True, nthreads=[])
-def test_non_existent_worker(c, s):
+async def test_non_existent_worker(c, s):
     with dask.config.set({"distributed.comm.timeouts.connect": "100ms"}):
-        s.add_worker(address="127.0.0.1:5738", nthreads=2, nbytes={}, host_info={})
+        await s.add_worker(
+            address="127.0.0.1:5738", nthreads=2, nbytes={}, host_info={}
+        )
         futures = c.map(inc, range(10))
-        yield gen.sleep(0.300)
+        await gen.sleep(0.300)
         assert not s.workers
         assert all(ts.state == "no-worker" for ts in s.tasks.values())
 
@@ -1172,7 +1164,7 @@ def test_correct_bad_time_estimate(c, s, *workers):
 
 
 @gen_test()
-def test_service_hosts():
+async def test_service_hosts():
     pytest.importorskip("bokeh")
     from distributed.dashboard import BokehScheduler
 
@@ -1184,26 +1176,20 @@ def test_service_hosts():
     ]:
         services = {("dashboard", port): BokehScheduler}
 
-        s = Scheduler(services=services)
-        yield s.start(url)
-
-        sock = first(s.services["dashboard"].server._http._sockets.values())
-        if isinstance(expected, tuple):
-            assert sock.getsockname()[0] in expected
-        else:
-            assert sock.getsockname()[0] == expected
-        yield s.close()
+        async with Scheduler(host=url, services=services) as s:
+            sock = first(s.services["dashboard"].server._http._sockets.values())
+            if isinstance(expected, tuple):
+                assert sock.getsockname()[0] in expected
+            else:
+                assert sock.getsockname()[0] == expected
 
     port = ("127.0.0.1", 0)
     for url in ["tcp://0.0.0.0", "tcp://127.0.0.1", "tcp://127.0.0.1:38275"]:
         services = {("dashboard", port): BokehScheduler}
 
-        s = Scheduler(services=services)
-        yield s.start(url)
-
-        sock = first(s.services["dashboard"].server._http._sockets.values())
-        assert sock.getsockname()[0] == "127.0.0.1"
-        yield s.close()
+        async with Scheduler(services=services, host=url) as s:
+            sock = first(s.services["dashboard"].server._http._sockets.values())
+            assert sock.getsockname()[0] == "127.0.0.1"
 
 
 @gen_cluster(client=True, worker_kwargs={"profile_cycle_interval": 100})
@@ -1325,19 +1311,19 @@ def test_retries(c, s, a, b):
 
 @pytest.mark.xfail(reason="second worker also errant for some reason")
 @gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 3, timeout=5)
-def test_mising_data_errant_worker(c, s, w1, w2, w3):
+async def test_mising_data_errant_worker(c, s, w1, w2, w3):
     with dask.config.set({"distributed.comm.timeouts.connect": "1s"}):
         np = pytest.importorskip("numpy")
 
         x = c.submit(np.random.random, 10000000, workers=w1.address)
-        yield wait(x)
-        yield c.replicate(x, workers=[w1.address, w2.address])
+        await wait(x)
+        await c.replicate(x, workers=[w1.address, w2.address])
 
         y = c.submit(len, x, workers=w3.address)
         while not w3.tasks:
-            yield gen.sleep(0.001)
-        w1.close()
-        yield wait(y)
+            await gen.sleep(0.001)
+        await w1.close()
+        await wait(y)
 
 
 @gen_cluster(client=True)
@@ -1600,7 +1586,7 @@ async def test_adaptive_target(c, s, a, b):
 
 
 @pytest.mark.asyncio
-async def test_async_context_manager():
+async def test_async_context_manager(cleanup):
     async with Scheduler(port=0) as s:
         assert s.status == "running"
         async with Worker(s.address) as w:
@@ -1610,7 +1596,7 @@ async def test_async_context_manager():
 
 
 @pytest.mark.asyncio
-async def test_allowed_failures_config():
+async def test_allowed_failures_config(cleanup):
     async with Scheduler(port=0, allowed_failures=10) as s:
         assert s.allowed_failures == 10
 
@@ -1621,3 +1607,13 @@ async def test_allowed_failures_config():
     with dask.config.set({"distributed.scheduler.allowed_failures": 0}):
         async with Scheduler(port=0) as s:
             assert s.allowed_failures == 0
+
+
+@pytest.mark.asyncio
+async def test_finished():
+    async with Scheduler(port=0) as s:
+        async with Worker(s.address) as w:
+            pass
+
+    await s.finished()
+    await w.finished()

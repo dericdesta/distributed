@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from toolz import valmap, first
 from tornado import gen
+from tornado.ioloop import IOLoop
 
 import dask
 from distributed import Nanny, rpc, Scheduler, Worker
@@ -19,7 +20,13 @@ from distributed.core import CommClosedError
 from distributed.metrics import time
 from distributed.protocol.pickle import dumps
 from distributed.utils import ignoring, tmpfile
-from distributed.utils_test import gen_cluster, gen_test, inc, captured_logger
+from distributed.utils_test import (  # noqa: F401
+    gen_cluster,
+    gen_test,
+    inc,
+    captured_logger,
+    cleanup,
+)
 
 
 @gen_cluster(nthreads=[])
@@ -82,7 +89,7 @@ def test_nanny_process_failure(c, s):
     pid = n.pid
     assert pid is not None
     with ignoring(CommClosedError):
-        yield c._run(os._exit, 0, workers=[n.worker_address])
+        yield c.run(os._exit, 0, workers=[n.worker_address])
 
     start = time()
     while n.pid == pid:  # wait while process dies and comes back
@@ -90,6 +97,7 @@ def test_nanny_process_failure(c, s):
         assert time() - start < 5
 
     start = time()
+    yield gen.sleep(1)
     while not n.is_alive():  # wait while process comes back
         yield gen.sleep(0.01)
         assert time() - start < 5
@@ -216,8 +224,7 @@ def test_num_fds(s):
 @gen_cluster(client=True, nthreads=[])
 def test_worker_uses_same_host_as_nanny(c, s):
     for host in ["tcp://0.0.0.0", "tcp://127.0.0.2"]:
-        n = Nanny(s.address)
-        yield n._start(host)
+        n = yield Nanny(s.address, host=host)
 
         def func(dask_worker):
             return dask_worker.listener.listen_address
@@ -230,8 +237,7 @@ def test_worker_uses_same_host_as_nanny(c, s):
 @gen_test()
 def test_scheduler_file():
     with tmpfile() as fn:
-        s = Scheduler(scheduler_file=fn)
-        s.start(8008)
+        s = yield Scheduler(scheduler_file=fn, port=8008)
         w = yield Nanny(scheduler_file=fn)
         assert set(s.workers) == {w.worker_address}
         yield w.close()
@@ -261,7 +267,7 @@ def test_nanny_timeout(c, s, a):
     Worker=Nanny,
     worker_kwargs={"memory_limit": 1e8},
     timeout=20,
-    check_new_threads=False,
+    clean_kwargs={"threads": False},
 )
 def test_nanny_terminate(c, s, a):
     from time import sleep
@@ -321,7 +327,7 @@ def test_scheduler_address_config(c, s):
 def test_wait_for_scheduler():
     with captured_logger("distributed") as log:
         w = Nanny("127.0.0.1:44737")
-        w.start()
+        IOLoop.current().add_callback(w.start)
         yield gen.sleep(6)
         yield w.close()
 
@@ -380,3 +386,15 @@ def test_mp_pool_worker_no_daemon(c, s, a):
             p.map(_noop, range(world_size))
 
     yield c.submit(pool_worker, 4)
+
+
+@pytest.mark.asyncio
+async def test_nanny_closes_cleanly(cleanup):
+    async with Scheduler() as s:
+        n = await Nanny(s.address)
+        assert n.process.pid
+        proc = n.process.process
+        await n.close()
+        assert not n.process
+        assert not proc.is_alive()
+        assert proc.exitcode == 0

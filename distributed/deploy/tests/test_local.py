@@ -14,11 +14,12 @@ from tornado.ioloop import IOLoop
 from tornado import gen
 import pytest
 
-from distributed import Client, Worker, Nanny
+from distributed import Client, Worker, Nanny, get_client
 from distributed.deploy.local import LocalCluster, nprocesses_nthreads
 from distributed.metrics import time
-from distributed.utils_test import (
+from distributed.utils_test import (  # noqa: F401
     clean,
+    cleanup,
     inc,
     gen_test,
     slowinc,
@@ -400,8 +401,9 @@ def test_silent_startup():
         from time import sleep
         from distributed import LocalCluster
 
-        with LocalCluster(1, dashboard_address=None, scheduler_port=0):
-            sleep(1.5)
+        if __name__ == "__main__":
+            with LocalCluster(1, dashboard_address=None, scheduler_port=0):
+                sleep(1.5)
         """
 
     out = subprocess.check_output(
@@ -801,7 +803,7 @@ def test_worker_class_nanny(loop):
 
 
 @pytest.mark.asyncio
-async def test_worker_class_nanny_async():
+async def test_worker_class_nanny_async(cleanup):
     class MyNanny(Nanny):
         pass
 
@@ -831,3 +833,26 @@ def test_starts_up_sync(loop):
         assert len(cluster.scheduler.workers) == 2
     finally:
         cluster.close()
+
+
+def test_dont_select_closed_worker():
+    # Make sure distributed does not try to reuse a client from a
+    # closed cluster (https://github.com/dask/distributed/issues/2840).
+    with clean(threads=False):
+        cluster = LocalCluster(n_workers=0)
+        c = Client(cluster)
+        cluster.scale(2)
+        assert c == get_client()
+
+        c.close()
+        cluster.close()
+
+        cluster2 = LocalCluster(n_workers=0)
+        c2 = Client(cluster2)
+        cluster2.scale(2)
+
+        current_client = get_client()
+        assert c2 == current_client
+
+        cluster2.close()
+        c2.close()

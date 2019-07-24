@@ -1,7 +1,6 @@
 from __future__ import print_function, division, absolute_import
 
 import atexit
-import dask
 import logging
 import gc
 import os
@@ -16,9 +15,9 @@ import click
 from tornado.ioloop import IOLoop
 
 from distributed import Scheduler
+from distributed.preloading import validate_preload_argv
 from distributed.security import Security
 from distributed.cli.utils import check_python_3, install_signal_handlers
-from distributed.preloading import preload_modules, validate_preload_argv
 from distributed.proctitle import (
     enable_proctitle_on_children,
     enable_proctitle_on_current,
@@ -120,6 +119,12 @@ pem_file_option_type = click.Path(exists=True, resolve_path=True)
 @click.argument(
     "preload_argv", nargs=-1, type=click.UNPROCESSED, callback=validate_preload_argv
 )
+@click.option(
+    "--idle-timeout",
+    default=None,
+    type=str,
+    help="Time of inactivity after which to kill the scheduler",
+)
 @click.version_option()
 def main(
     host,
@@ -141,6 +146,7 @@ def main(
     tls_cert,
     tls_key,
     dashboard_address,
+    idle_timeout,
 ):
     g0, g1, g2 = gc.get_threshold()  # https://github.com/dask/distributed/issues/1653
     gc.set_threshold(g0 * 3, g1 * 3, g2 * 3)
@@ -211,24 +217,21 @@ def main(
         protocol=protocol,
         dashboard_address=dashboard_address if dashboard else None,
         service_kwargs={"dashboard": {"prefix": dashboard_prefix}},
+        idle_timeout=idle_timeout,
+        preload=preload,
+        preload_argv=preload_argv,
     )
-    scheduler.start()
-    if not preload:
-        preload = dask.config.get("distributed.scheduler.preload")
-    if not preload_argv:
-        preload_argv = dask.config.get("distributed.scheduler.preload-argv")
-    preload_modules(
-        preload, parameter=scheduler, file_dir=local_directory, argv=preload_argv
-    )
-
     logger.info("Local Directory: %26s", local_directory)
     logger.info("-" * 47)
 
     install_signal_handlers(loop)
 
+    async def run():
+        await scheduler
+        await scheduler.finished()
+
     try:
-        loop.start()
-        loop.close()
+        loop.run_sync(run)
     finally:
         scheduler.stop()
         if local_directory_created:

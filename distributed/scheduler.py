@@ -4422,8 +4422,8 @@ class Scheduler(ServerNode):
             w = {
                 resource: {
                     w
-                    for w, supplied in self.resources[resource].items()
-                    if supplied >= required
+                    for w, ws in self.workers.items()
+                    if ws.available_resources[resource] >= required
                 }
                 for resource, required in ts.resource_restrictions.items()
             }

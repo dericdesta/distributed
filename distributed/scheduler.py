@@ -266,6 +266,14 @@ class WorkerState(object):
     def host(self):
         return get_address_host(self.address)
 
+    @property
+    def available_resources(self):
+        if self.used_resources:
+            return {r: self.resources[r] - self.used_resources[r]
+                    for r in self.resources.keys() & self.used_resources.keys()}
+        else:
+            return self.resources
+
     def clean(self):
         """ Return a version of this object that is appropriate for serialization """
         ws = WorkerState(

@@ -26,7 +26,6 @@ except ImportError:
     from toolz import pluck, partial, merge, first
 from tornado import gen
 from tornado.ioloop import IOLoop
-from tornado.locks import Event
 
 from . import profile, comm
 from .batched import BatchedSend
@@ -546,7 +545,6 @@ class Worker(ServerNode):
         self.actors = {}
         self.loop = loop or IOLoop.current()
         self.status = None
-        self._closed = Event()
         self.reconnect = reconnect
         self.executor = executor or ThreadPoolExecutor(
             self.nthreads, thread_name_prefix="Dask-Worker-Threads'"
@@ -713,7 +711,9 @@ class Worker(ServerNode):
     @property
     def local_dir(self):
         """ For API compatibility with Nanny """
-        warnings.warn("The local_dir attribute has moved to local_directory")
+        warnings.warn(
+            "The local_dir attribute has moved to local_directory", stacklevel=2
+        )
         return self.local_directory
 
     def get_metrics(self):
@@ -822,6 +822,13 @@ class Worker(ServerNode):
 
         self.batched_stream = BatchedSend(interval="2ms", loop=self.loop)
         self.batched_stream.start(comm)
+        pc = PeriodicCallback(
+            lambda: self.batched_stream.send({"op": "keep-alive"}),
+            60000,
+            io_loop=self.io_loop,
+        )
+        self.periodic_callbacks["keep-alive"] = pc
+        pc.start()
         self.periodic_callbacks["heartbeat"].start()
         self.loop.add_callback(self.handle_scheduler, comm)
 
@@ -1054,7 +1061,6 @@ class Worker(ServerNode):
 
             self.stop()
             self.rpc.close()
-            self._closed.set()
 
             self.status = "closed"
             await ServerNode.close(self)
@@ -1084,7 +1090,8 @@ class Worker(ServerNode):
         return "OK"
 
     async def wait_until_closed(self):
-        await self._closed.wait()
+        warnings.warn("wait_until_closed has moved to finished()")
+        await self.finished()
         assert self.status == "closed"
 
     ################

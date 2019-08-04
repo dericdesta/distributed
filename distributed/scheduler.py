@@ -1033,6 +1033,7 @@ class Scheduler(ServerNode):
             "missing-data": self.handle_missing_data,
             "long-running": self.handle_long_running,
             "reschedule": self.reschedule,
+            "keep-alive": lambda *args, **kwargs: None,
         }
 
         client_handlers = {
@@ -2906,7 +2907,14 @@ class Scheduler(ServerNode):
         )
 
     def workers_to_close(
-        self, comm=None, memory_ratio=None, n=None, key=None, minimum=None
+        self,
+        comm=None,
+        memory_ratio=None,
+        n=None,
+        key=None,
+        minimum=None,
+        target=None,
+        attribute="address",
     ):
         """
         Find workers that we can close with low cost
@@ -2933,6 +2941,11 @@ class Scheduler(ServerNode):
             An optional callable mapping a WorkerState object to a group
             affiliation.  Groups will be closed together.  This is useful when
             closing workers must be done collectively, such as by hostname.
+        target: int
+            Target number of workers to have after we close
+        attribute : str
+            The attribute of the WorkerState object to return, like "address"
+            or "name".  Defaults to "address".
 
         Examples
         --------
@@ -2960,6 +2973,13 @@ class Scheduler(ServerNode):
         --------
         Scheduler.retire_workers
         """
+        if target is not None and n is None:
+            n = len(self.workers) - target
+        if n is not None:
+            if n < 0:
+                n = 0
+            target = len(self.workers) - n
+
         if n is None and memory_ratio is None:
             memory_ratio = 2
 
@@ -2984,12 +3004,12 @@ class Scheduler(ServerNode):
             limit = sum(limit_bytes.values())
             total = sum(group_bytes.values())
 
-            def key(group):
+            def _key(group):
                 is_idle = not any(ws.processing for ws in groups[group])
                 bytes = -group_bytes[group]
                 return (is_idle, bytes)
 
-            idle = sorted(groups, key=key)
+            idle = sorted(groups, key=_key)
 
             to_close = []
             n_remain = len(self.workers)
@@ -3004,7 +3024,7 @@ class Scheduler(ServerNode):
 
                 limit -= limit_bytes[group]
 
-                if (n is not None and len(to_close) < n) or (
+                if (n is not None and n_remain - len(groups[group]) >= target) or (
                     memory_ratio is not None and limit >= memory_ratio * total
                 ):
                     to_close.append(group)
@@ -3013,22 +3033,30 @@ class Scheduler(ServerNode):
                 else:
                     break
 
-            result = [ws.address for g in to_close for ws in groups[g]]
+            result = [getattr(ws, attribute) for g in to_close for ws in groups[g]]
             if result:
                 logger.info("Suggest closing workers: %s", result)
 
             return result
 
     async def retire_workers(
-        self, comm=None, workers=None, remove=True, close_workers=False, **kwargs
+        self,
+        comm=None,
+        workers=None,
+        remove=True,
+        close_workers=False,
+        names=None,
+        **kwargs
     ):
         """ Gracefully retire workers from cluster
 
         Parameters
         ----------
         workers: list (optional)
-            List of worker IDs to retire.
+            List of worker addresses to retire.
             If not provided we call ``workers_to_close`` which finds a good set
+        workers_names: list (optional)
+            List of worker names to retire.
         remove: bool (defaults to True)
             Whether or not to remove the worker metadata immediately or else
             wait for the worker to contact us
@@ -3050,6 +3078,11 @@ class Scheduler(ServerNode):
         Scheduler.workers_to_close
         """
         with log_errors():
+            if names is not None:
+                names = set(names)
+                workers = [
+                    ws.address for ws in self.workers.values() if ws.name in names
+                ]
             if workers is None:
                 while True:
                     try:
@@ -3060,17 +3093,16 @@ class Scheduler(ServerNode):
                                 remove=remove,
                                 close_workers=close_workers,
                             )
-                        raise gen.Return(workers)
+                        return workers
                     except KeyError:  # keys left during replicate
                         pass
-
             workers = {self.workers[w] for w in workers if w in self.workers}
-            if len(workers) > 0:
-                # Keys orphaned by retiring those workers
-                keys = set.union(*[w.has_what for w in workers])
-                keys = {ts.key for ts in keys if ts.who_has.issubset(workers)}
-            else:
-                keys = set()
+            if not workers:
+                return []
+
+            # Keys orphaned by retiring those workers
+            keys = set.union(*[w.has_what for w in workers])
+            keys = {ts.key for ts in keys if ts.who_has.issubset(workers)}
 
             other_workers = set(self.workers.values()) - workers
             if keys:
@@ -4342,7 +4374,14 @@ class Scheduler(ServerNode):
         Things may have shifted and this task may now be better suited to run
         elsewhere
         """
-        ts = self.tasks[key]
+        try:
+            ts = self.tasks[key]
+        except KeyError:
+            logger.warning(
+                "Attempting to reschedule task {}, which was not "
+                "found on the scheduler. Aborting reschedule.".format(key)
+            )
+            return
         if ts.state != "processing":
             return
         if worker and ts.processing_on.address != worker:
